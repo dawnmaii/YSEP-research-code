@@ -36,8 +36,8 @@ print("✅ Imports loaded.")
 # ==============================================================================
 # SECTION 2: CONFIGURATION
 # ==============================================================================
-GITHUB_URL = "https://github.com/GoogleCloudPlatform/bank-of-anthos.git"
-LOCAL_REPO_DIR = "./bank-of-anthos"
+GITHUB_URL = "https://github.com/LauroSilveira/microservices-java-spring-boot.git"
+LOCAL_REPO_DIR = "./microservices-java-spring-boot"
 EXTRACTED_DIR = "./extracted_artifacts"
 METADATA_FILE = "metadata.json"
 OUTPUT_JSONL_FILE = "./structural_chunks.jsonl"
@@ -376,13 +376,13 @@ print(f"Using Pydantic version: {pydantic_version}")
 if not pydantic_version.startswith("2."):
     print("WARNING: Pydantic V2 is strongly recommended for PydanticOutputParser compatibility.")
 
-# @title 3.1 Clone Microservices Demo Repository (if not already present)
-# Description: Clones the Google Cloud microservices-demo repository to be analyzed.
+# @title 3.1 Clone Microservices Java Spring Boot Repository (if not already present)
+# Description: Clones the LauroSilveira/microservices-java-spring-boot repository to be analyzed.
 
 import os
 
-MICROSERVICES_REPO_URL = "https://github.com/GoogleCloudPlatform/bank-of-anthos.git"
-MICROSERVICES_REPO_PATH = "bank-of-anthos" # Local directory name
+MICROSERVICES_REPO_URL = "https://github.com/LauroSilveira/microservices-java-spring-boot.git"
+MICROSERVICES_REPO_PATH = "microservices-java-spring-boot" # Local directory name
 
 
 if not os.path.exists(MICROSERVICES_REPO_PATH):
@@ -3878,26 +3878,56 @@ def create_execution_plan(outline_text):
     lines = outline_text.strip().split('\n')
     bullet_regex = re.compile(r'^\s*-\s*\*\*(.*?):\*\*\s*(.*)')
 
+    inferred_services = INFERRED_TOP_LEVEL_SERVICES if 'INFERRED_TOP_LEVEL_SERVICES' in globals() else []
+
+    def normalize_service_key(name: str) -> str:
+        key = name.lower().strip('`* ')
+        key = key.replace('-', '_')
+        for suffix in ['_service', '-service', 'service']:
+            if key.endswith(suffix):
+                key = key[: -len(suffix)]
+        return key.strip('_-')
+
+    def is_known_service(name: str) -> bool:
+        if not inferred_services:
+            return True
+        return normalize_service_key(name) in {normalize_service_key(s) for s in inferred_services}
+
+    def get_service_display_name(canonical_name: str) -> str:
+        if 'IDENTIFIED_SERVICES_DETAILS' in globals() and IDENTIFIED_SERVICES_DETAILS:
+            for s_info in IDENTIFIED_SERVICES_DETAILS:
+                if normalize_service_key(s_info.name) == normalize_service_key(canonical_name):
+                    return s_info.name
+        return canonical_name
+
     # Context Trackers
     current_section = None
     current_service = None
+    included_services = set()
+    service_details_header_seen = False
 
     for line in lines:
         line = line.strip()
-        if not line: continue
+        if not line:
+            continue
 
         # Case 1: Main Section Headers (e.g., "# 3. Service Details")
         if line.startswith('# '):
             current_section = re.sub(r'^#\s*(\d+\.?\s*)?', '', line).strip()
-            current_service = None # Reset service context
+            current_service = None  # Reset service context
             plan.append({'type': 'header', 'text': line})
+            if 'service details' in (current_section or '').lower():
+                service_details_header_seen = True
             continue
 
         # Case 2: Service Sub-Headers (e.g., "## `cartservice`")
         if line.startswith('##'):
             clean_header = re.sub(r'^##\s*', '', line).strip(' `*')
             if clean_header:
+                if inferred_services and not is_known_service(clean_header):
+                    continue
                 current_service = f"`{clean_header}`"
+                included_services.add(normalize_service_key(clean_header))
                 plan.append({'type': 'header', 'text': line})
                 # Add an implicit "Overview" query for the service
                 plan.append({
@@ -3912,19 +3942,35 @@ def create_execution_plan(outline_text):
         bullet_match = bullet_regex.match(line)
 
         if bullet_match:
-            label = bullet_match.group(1).strip().lower()
+            label = bullet_match.group(1).strip()
             content = bullet_match.group(2).strip().rstrip('.')
-            # Construct Query: "[Service Name] [Label]: [Content]"
-            prefix = f"{current_service} {label}: " if current_service else f"{label}: "
-            query_text = f"{prefix} {content}"
+            label_key = normalize_service_key(label)
+
+            # If we're in Service Details and this bullet is a service name, handle it explicitly
+            if (current_section or '').lower().startswith('service details') and not current_service:
+                if inferred_services and not is_known_service(label):
+                    continue
+                if inferred_services:
+                    display = get_service_display_name(label)
+                    current_service = f"`{display}`"
+                    included_services.add(normalize_service_key(display))
+                    plan.append({'type': 'header', 'text': f"## {current_service}"})
+                    query_text = f"{current_service} purpose: {content}"
+                else:
+                    prefix = f"{label}: "
+                    query_text = f"{prefix} {content}"
+            else:
+                # Construct Query: "[Service Name] [Label]: [Content]"
+                prefix = f"{current_service} {label_key}: " if current_service else f"{label_key}: "
+                query_text = f"{prefix} {content}"
 
         elif line.startswith('- ') or line.startswith('* '):
             clean_text = line.lstrip('-* ').strip()
             query_text = f"{current_service}: {clean_text}" if current_service else clean_text
 
         elif not line.startswith('#') and len(line) > 10:
-             prefix = f"[{current_section}] " if current_section else ""
-             query_text = prefix + line
+            prefix = f"[{current_section}] " if current_section else ""
+            query_text = prefix + line
 
         if query_text:
             plan.append({
@@ -3932,6 +3978,22 @@ def create_execution_plan(outline_text):
                 'text': query_text,
                 'section_context': current_section or "General"
             })
+
+    # Add missing service sections based on inferred services
+    if inferred_services:
+        missing = [s for s in inferred_services if normalize_service_key(s) not in included_services]
+        if missing:
+            if not service_details_header_seen:
+                plan.append({'type': 'header', 'text': '# Service Details'})
+            for svc in missing:
+                display = get_service_display_name(svc)
+                svc_ref = f"`{display}`"
+                plan.append({'type': 'header', 'text': f"## {svc_ref}"})
+                plan.append({'type': 'query', 'text': f"High-level overview and purpose of the {svc_ref} service."})
+                plan.append({'type': 'query', 'text': f"{svc_ref} main responsibilities: "})
+                plan.append({'type': 'query', 'text': f"{svc_ref} key dependencies: "})
+                plan.append({'type': 'query', 'text': f"{svc_ref} key components: "})
+                plan.append({'type': 'query', 'text': f"{svc_ref} programming language: "})
 
     return plan
 
@@ -4052,6 +4114,7 @@ print("="*50)
 import time
 import re
 import os
+import json
 import numpy as np
 from tqdm.notebook import tqdm
 from langchain_core.prompts import ChatPromptTemplate
@@ -4094,13 +4157,18 @@ class GraphFirstRetriever:
         # Build Reverse Index (Path -> [Document])
         print("   [KG-First] Building Path->Chunk Reverse Index...")
         self.path_to_docs = {}
+        # Reuse the normalization function from reranker
+        self._normalize_path = original_reranker._normalize_path
         # Access the underlying docstore from FAISS
         for doc_id, doc in self.faiss_store.docstore._dict.items():
             path = doc.metadata.get('relative_path')
             if path:
-                if path not in self.path_to_docs:
-                    self.path_to_docs[path] = []
-                self.path_to_docs[path].append(doc)
+                # Normalize path to match Neo4j path format
+                norm_path = self._normalize_path(path)
+                if norm_path:
+                    if norm_path not in self.path_to_docs:
+                        self.path_to_docs[norm_path] = []
+                    self.path_to_docs[norm_path].append(doc)
         print(f"   [KG-First] Index ready. Mapped {len(self.path_to_docs)} files.")
 
     def _get_cypher_strategy(self, query_text: str) -> tuple[int, list[str]]:
@@ -4136,8 +4204,8 @@ class GraphFirstRetriever:
         elif "cross-cutting" in q_lower or "security" in q_lower or "logging" in q_lower:
             return KG_HOPS_BROAD, ["DEPENDS_ON", "HAS_COMPONENT"]
 
-        # Default / Fallback
-        return KG_HOPS_STRICT, []
+        # Default / Fallback - Use broader strategy when no specific pattern matches
+        return KG_HOPS_BROAD, ["CONNECTS_TO", "DEPENDS_ON", "HAS_COMPONENT", "WRITES_TO", "READS_FROM"]
 
     def retrieve(self, query: str, top_k: int = 5) -> list[dict]:
         # 1. Entity Extraction
@@ -4171,14 +4239,88 @@ class GraphFirstRetriever:
             print(f"   [KG-First] Cypher Error: {e}")
             target_paths = []
 
-        if not target_paths: return []
+        # Fallback: If no paths found and edge_types were restrictive, try with broader edge types
+        if not target_paths and edge_types:
+
+            # Retry with broader edge types and more hops
+            fallback_edge_types = ["CONNECTS_TO", "DEPENDS_ON", "HAS_COMPONENT", "WRITES_TO", "READS_FROM", "PUBLISHES_TO", "SUBSCRIBES_TO"]
+            fallback_hops = max(hops, KG_HOPS_BROAD)
+            types_str = "|".join([f"`{t}`" for t in fallback_edge_types])
+            fallback_rels_str = f"[:{types_str}*1..{fallback_hops}]"
+
+            fallback_cypher = f"""
+            MATCH (s)
+            WHERE elementId(s) IN $q_ids
+            MATCH (s)-{fallback_rels_str}-(t)
+            WHERE t.path IS NOT NULL
+            RETURN DISTINCT t.path as file_path
+            """
+
+            try:
+                with self.driver.session() as session:
+                    result = session.run(fallback_cypher, q_ids=q_ids)
+                    target_paths = [record["file_path"] for record in result]
+
+            except Exception as e:
+                target_paths = []
+
+        if not target_paths:
+            # Removed log_debug since it's commented out earlier
+            # log_debug("FAILURE: no target paths after fallback", {"q_ids_count": len(q_ids), "hops": hops, "edge_types": edge_types})
+            # Fallback: semantic retrieval when KG yields no paths
+            try:
+                semantic_hits = self.faiss_store.similarity_search_with_score(query, k=top_k)
+                # Removed log_debug since it's commented out earlier
+                # log_debug("fallback semantic search used (no target paths)", {"hit_count": len(semantic_hits)})
+                return [
+                    {"doc": doc, "semantic_score": float(score), "final_score": float(score)}
+                    for doc, score in semantic_hits
+                ]
+            except Exception as e:
+                # Removed log_debug since it's commented out earlier
+                # log_debug("fallback semantic search failed (no target paths)", {"error": str(e)[:200]})
+                return []
 
         # 3. Fetch Chunks (The Candidate Set)
         candidate_docs = []
+        paths_found = 0
+        paths_not_found = []
         for path in target_paths:
-            if path in self.path_to_docs:
+            if not path:
+                continue
+            # Normalize the path from Neo4j to match path_to_docs keys
+            norm_path = self._normalize_path(path)
+            # Try normalized path first, then original path as fallback
+            matched = False
+            if norm_path and norm_path in self.path_to_docs:
+                candidate_docs.extend(self.path_to_docs[norm_path])
+                paths_found += 1
+                matched = True
+            elif path in self.path_to_docs:
+                # Fallback: try original path (in case normalization changed it unexpectedly)
                 candidate_docs.extend(self.path_to_docs[path])
-        if not candidate_docs: return []
+                paths_found += 1
+                matched = True
+
+            if not matched:
+                paths_not_found.append(path)
+
+        if not candidate_docs:
+            # Removed log_debug since it's commented out earlier
+            # log_debug("FAILURE: no candidate docs", {"target_paths_count": len(target_paths), "paths_found": paths_found, "sample_not_found": paths_not_found[:3]})
+            # Fallback: semantic retrieval when paths map to no docs
+            try:
+                semantic_hits = self.faiss_store.similarity_search_with_score(query, k=top_k)
+                # Removed log_debug since it's commented out earlier
+                # log_debug("fallback semantic search used (no candidate docs)", {"hit_count": len(semantic_hits)})
+                return [
+                    {"doc": doc, "semantic_score": float(score), "final_score": float(score)}
+                    for doc, score in semantic_hits
+                ]
+            except Exception as e:
+                # Removed log_debug since it's commented out earlier
+                # log_debug("fallback semantic search failed (no candidate docs)", {"error": str(e)[:200]})
+                return []
 
         # 4. Semantic Sorting (The "Ranking")
         query_embedding = self.embeddings_model.embed_query(query)
@@ -4272,25 +4414,56 @@ def create_execution_plan_local(outline_text):
     plan = []
     lines = outline_text.strip().split('\n')
     bullet_regex = re.compile(r'^\s*-\s*\*\*(.*?):\*\*\s*(.*)')
+
+    inferred_services = INFERRED_TOP_LEVEL_SERVICES if 'INFERRED_TOP_LEVEL_SERVICES' in globals() else []
+
+    def normalize_service_key(name: str) -> str:
+        key = name.lower().strip('`* ')
+        key = key.replace('-', '_')
+        for suffix in ['_service', '-service', 'service']:
+            if key.endswith(suffix):
+                key = key[: -len(suffix)]
+        return key.strip('_-')
+
+    def is_known_service(name: str) -> bool:
+        if not inferred_services:
+            return True
+        return normalize_service_key(name) in {normalize_service_key(s) for s in inferred_services}
+
+    def get_service_display_name(canonical_name: str) -> str:
+        if 'IDENTIFIED_SERVICES_DETAILS' in globals() and IDENTIFIED_SERVICES_DETAILS:
+            for s_info in IDENTIFIED_SERVICES_DETAILS:
+                if normalize_service_key(s_info.name) == normalize_service_key(canonical_name):
+                    return s_info.name
+        return canonical_name
+
     current_section = None
     current_service = None
+    included_services = set()
+    service_details_header_seen = False
 
     for line in lines:
         line = line.strip()
-        if not line: continue
+        if not line:
+            continue
 
         # Headers
         if line.startswith('# '):
             current_section = re.sub(r'^#\s*(\d+\.?\s*)?', '', line).strip()
             current_service = None
             plan.append({'type': 'header', 'text': line})
+            if 'service details' in (current_section or '').lower():
+                service_details_header_seen = True
             continue
 
         # Service Headers
         if line.startswith('##'):
             clean_header = re.sub(r'^##\s*', '', line).strip(' `*')
             if clean_header:
+                if inferred_services and not is_known_service(clean_header):
+                    continue
                 current_service = f"`{clean_header}`"
+                included_services.add(normalize_service_key(clean_header))
                 plan.append({'type': 'header', 'text': line})
                 plan.append({'type': 'query', 'text': f"High-level overview and purpose of the {current_service} service."})
                 continue
@@ -4300,10 +4473,25 @@ def create_execution_plan_local(outline_text):
         bullet_match = bullet_regex.match(line)
 
         if bullet_match:
-            label = bullet_match.group(1).strip().lower()
+            label = bullet_match.group(1).strip()
             content = bullet_match.group(2).strip().rstrip('.')
-            prefix = f"{current_service} {label}: " if current_service else f"{label}: "
-            query_text = f"{prefix} {content}"
+            label_key = normalize_service_key(label)
+
+            if (current_section or '').lower().startswith('service details') and not current_service:
+                if inferred_services and not is_known_service(label):
+                    continue
+                if inferred_services:
+                    display = get_service_display_name(label)
+                    current_service = f"`{display}`"
+                    included_services.add(normalize_service_key(display))
+                    plan.append({'type': 'header', 'text': f"## {current_service}"})
+                    query_text = f"{current_service} purpose: {content}"
+                else:
+                    prefix = f"{label}: "
+                    query_text = f"{prefix} {content}"
+            else:
+                prefix = f"{current_service} {label_key}: " if current_service else f"{label_key}: "
+                query_text = f"{prefix} {content}"
         elif line.startswith('- ') or line.startswith('* '):
             clean_text = line.lstrip('-* ').strip()
             query_text = f"{current_service}: {clean_text}" if current_service else clean_text
@@ -4313,6 +4501,22 @@ def create_execution_plan_local(outline_text):
 
         if query_text:
             plan.append({'type': 'query', 'text': query_text})
+
+    # Add missing service sections based on inferred services
+    if inferred_services:
+        missing = [s for s in inferred_services if normalize_service_key(s) not in included_services]
+        if missing:
+            if not service_details_header_seen:
+                plan.append({'type': 'header', 'text': '# Service Details'})
+            for svc in missing:
+                display = get_service_display_name(svc)
+                svc_ref = f"`{display}`"
+                plan.append({'type': 'header', 'text': f"## {svc_ref}"})
+                plan.append({'type': 'query', 'text': f"High-level overview and purpose of the {svc_ref} service."})
+                plan.append({'type': 'query', 'text': f"{svc_ref} main responsibilities: "})
+                plan.append({'type': 'query', 'text': f"{svc_ref} key dependencies: "})
+                plan.append({'type': 'query', 'text': f"{svc_ref} key components: "})
+                plan.append({'type': 'query', 'text': f"{svc_ref} programming language: "})
 
     return plan
 
@@ -4341,8 +4545,19 @@ else:
         candidates = kg_retriever.retrieve(query, top_k=TOP_K_CONTEXT)
 
         if not candidates:
-            full_doc_kg_ablation.append("\n*No info found (Graph Disconnected).*\n")
-            continue
+            # Last-resort semantic fallback to avoid Graph Disconnected markers
+            try:
+                semantic_hits = reranker.faiss_store.similarity_search_with_score(query, k=TOP_K_CONTEXT)
+                candidates = [
+                    {"doc": doc, "semantic_score": float(score), "final_score": float(score)}
+                    for doc, score in semantic_hits
+                ]
+            except Exception as e:
+                candidates = []
+
+            if not candidates:
+                full_doc_kg_ablation.append("\n*No info found.*\n")
+                continue
 
         # 2. FORMAT (Full File Expansion)
         context_str = format_docs_kg(candidates, TOP_K_CONTEXT)
@@ -4398,7 +4613,7 @@ from langchain_community.callbacks import get_openai_callback # For Token Counti
 # Configuration
 BASELINE_MODEL = "gpt-4o"  # Updated to GPT-4o
 OUTPUT_DIR = "./generated_docs"
-REPO_URL = "https://github.com/GoogleCloudPlatform/bank-of-anthos"
+REPO_URL = "https://github.com/LauroSilveira/microservices-java-spring-boot"
 
 
 # Ensure output directory exists
@@ -4480,9 +4695,11 @@ if 'llm' in globals():
 # @title 20. LLM-as-a-Judge Evaluation Framework [UNIVERSAL ARCHITECT]
 # Description: Evaluates documentation using a granular Scorecard.
 #              Generalized to work on ANY repository (not just Microservices Demo).
+!pip install langchain_openai -q
 
 import os
 import glob
+import re
 import pandas as pd
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -4490,7 +4707,7 @@ from pydantic import BaseModel, Field
 
 # --- 1. CONFIGURATION ---
 JUDGE_MODEL = "gpt-5.1"
-REPO_DIR = "./bank-of-anthos"
+REPO_DIR = "./microservices-java-spring-boot"
 DOCS_DIR = "./generated_docs"
 
 # Context Filters
@@ -4509,10 +4726,46 @@ KNOWN_CONFIG_FILENAMES = [
 ]
 CONFIG_EXTENSIONS = (".yaml", ".yml", ".json", ".env", ".toml", ".ini", ".conf", ".tf", ".tfvars", ".properties")
 
-# --- 2. CONTEXT BUILDER ---
+# --- 2. SERVICE DISCOVERY (GROUND TRUTH) ---
+SERVICE_PARENT_DIRS = ["microservices", "services", "service"]
+SERVICE_NAME_STOPLIST = {"service", "services", "svc", "api", "gateway", "db", "cache"}
+
+def extract_service_names(repo_path: str) -> list[str]:
+    service_names: set[str] = set()
+
+    # Preferred: immediate children under known service parent directories
+    for parent in SERVICE_PARENT_DIRS:
+        parent_path = os.path.join(repo_path, parent)
+        if os.path.isdir(parent_path):
+            for name in os.listdir(parent_path):
+                full_path = os.path.join(parent_path, name)
+                if os.path.isdir(full_path):
+                    service_names.add(name)
+
+    # Fallback: top-level dirs that look like service names
+    if not service_names:
+        for name in os.listdir(repo_path):
+            full_path = os.path.join(repo_path, name)
+            if not os.path.isdir(full_path):
+                continue
+            lower = name.lower()
+            if (
+                lower.endswith("service")
+                or lower.endswith("-service")
+                or lower.endswith("_service")
+                or lower.endswith("svc")
+                or lower.endswith("-svc")
+                or lower.endswith("_svc")
+            ):
+                service_names.add(name)
+
+    return sorted(service_names, key=lambda s: s.lower())
+
+# --- 3. CONTEXT BUILDER ---
 def build_ground_truth_context(repo_path):
     structural_context = []
     env_context = []
+    service_names = extract_service_names(repo_path)
     print(f"Building Ground Truth from: {repo_path}...")
 
     for root, dirs, files in os.walk(repo_path, topdown=True):
@@ -4535,7 +4788,119 @@ def build_ground_truth_context(repo_path):
                         env_context.append(f"=== CONFIG FILE: {rel_path} ===\n{content}\n")
                 except: pass
 
-    return "\n".join(structural_context), "\n".join(env_context)
+    return "\n".join(structural_context), "\n".join(env_context), service_names
+
+# --- 2.5 DOC ANALYSIS HELPERS ---
+def find_mentioned_services(doc_text: str, service_names: list[str]) -> set[str]:
+    mentioned: set[str] = set()
+    if not service_names:
+        return mentioned
+    for name in service_names:
+        if re.search(r"\b" + re.escape(name) + r"\b", doc_text, flags=re.IGNORECASE):
+            mentioned.add(name)
+    return mentioned
+
+
+def extract_service_section(doc_text: str) -> str:
+    if not doc_text:
+        return ""
+    lines = doc_text.splitlines()
+    start_idx = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*#+\s*service details", line, flags=re.IGNORECASE):
+            start_idx = i + 1
+            break
+    if start_idx is None:
+        return doc_text
+
+    end_idx = len(lines)
+    for j in range(start_idx, len(lines)):
+        if re.match(r"^\s*#+\s*", lines[j]):
+            end_idx = j
+            break
+    return "\n".join(lines[start_idx:end_idx])
+
+
+def find_unsupported_service_mentions(doc_text: str, service_names: list[str]) -> set[str]:
+    if not doc_text:
+        return set()
+    service_lookup = {s.lower() for s in service_names}
+
+    section_text = extract_service_section(doc_text)
+    candidates = set()
+    candidates.update(re.findall(r"\b([A-Za-z0-9_-]{2,}(?:service|svc))\b", section_text, flags=re.IGNORECASE))
+    candidates.update(re.findall(r"service\s*[:\-]\s*([A-Za-z0-9_-]{2,})", section_text, flags=re.IGNORECASE))
+
+    for line in section_text.splitlines():
+        if re.match(r"^\s*#+\s*", line):
+            candidates.update(re.findall(r"([A-Za-z0-9_-]{2,}(?:service|svc))", line, flags=re.IGNORECASE))
+
+    unsupported = set()
+    for cand in candidates:
+        lower = cand.lower()
+        if lower in SERVICE_NAME_STOPLIST:
+            continue
+        if lower not in service_lookup:
+            unsupported.add(cand)
+    return unsupported
+
+
+def count_negative_service_markers(doc_text: str) -> int:
+    section_text = extract_service_section(doc_text)
+    if not section_text:
+        return 0
+    markers = [
+        "not present",
+        "not mentioned",
+        "no information",
+        "no info found",
+        "does not exist",
+        "not found",
+        "not specified",
+    ]
+    lower = section_text.lower()
+    return sum(lower.count(m) for m in markers)
+
+
+def extract_ground_truth_terms(env_context: str, service_names: list[str]) -> list[str]:
+    known_terms = [
+        "prometheus", "grafana", "loki", "tempo", "zipkin", "jaeger",
+        "opentelemetry", "otel", "fluent", "fluent-bit", "elasticsearch",
+        "kibana", "logstash", "kafka", "rabbitmq", "redis", "mongodb",
+        "postgres", "postgresql", "mysql", "mariadb", "keycloak",
+        "oauth2", "openid", "docker", "kubernetes", "helm", "skaffold",
+    ]
+    env_lower = (env_context or "").lower()
+    terms = set()
+
+    for term in known_terms:
+        if term in env_lower:
+            terms.add(term)
+
+    for s in service_names or []:
+        terms.add(s.lower())
+
+    return sorted(terms)
+
+
+def count_term_contradictions(doc_text: str, terms: list[str]) -> int:
+    if not doc_text or not terms:
+        return 0
+    text = doc_text.lower()
+    count = 0
+    for term in terms:
+        if term not in text:
+            continue
+        neg_pattern = (
+            r"(no (mention|mentions|reference|references|evidence|sign) of\s+" + re.escape(term) + r")"
+            r"|(not mentioned\s+" + re.escape(term) + r")"
+            r"|(not referenced\s+" + re.escape(term) + r")"
+            r"|(no evidence of\s+" + re.escape(term) + r")"
+            r"|(does not (use|include|mention|reference)\s+" + re.escape(term) + r")"
+        )
+        if re.search(neg_pattern, text):
+            count += 1
+    return count
 
 # --- 3. SCORING SCHEMA ---
 class EvaluationScore(BaseModel):
@@ -4560,67 +4925,81 @@ class EvaluationScore(BaseModel):
 JUDGE_SYSTEM_PROMPT = """You are a Principal Software Architect acting as a Judge.
 Compare the [GENERATED DOCUMENTATION] against the [GROUND TRUTH REPO].
 
-**CORE INSTRUCTION:** Reward **Specificity** (e.g., "Locust v2.40") higher than **Generality** (e.g., "Uses Locust").
-Reward **Discovery** (e.g., finding hidden DBs/APIs) higher than **Summary**.
+**ABSOLUTE RULE:** Use ONLY the provided ground-truth context (file structure, configs, service list).
+Do NOT rely on prior knowledge of any repo or domain. If a claim is not supported by the ground-truth
+context, treat it as hallucination.
+
+**EVIDENCE STANDARD:** Prefer statements that can be directly verified from the provided context.
+Penalize unsupported specificity more than cautious generality.
+Penalize internal contradictions (e.g., claiming "no mention of X" while also describing X).
+
+**SERVICE CONSISTENCY RULE:** The provided service list is authoritative. Mentions of services
+not in that list should reduce **faithfulness** and **correctness**. Missing most services
+should reduce **completeness**.
+
+**GENERALITY RULE:** The rubric must apply to ANY repository. Do not assume microservices unless
+supported by ground-truth evidence.
 
 ### 🔍 SECTION-BY-SECTION SCORING MATRIX
 
 #### **1. Introduction & High-Level Architecture**
-* **Look for:** Correct identification of the **System Type** (e.g., Microservices, Monolith, CLI, Library).
-* **Look for:** Mention of key protocols (gRPC, REST) and Infrastructure (K8s, AWS, etc.).
-* **Score 5:** Specific tech mentioned (e.g., "11-tier microservices on GKE").
-* **Score 3:** Generic description (e.g., "An e-commerce platform").
+* **Look for:** Correct identification of the **System Type** (Microservices, Monolith, CLI, Library, etc.).
+* **Look for:** Mention of protocols/infrastructure ONLY if present in ground-truth context.
+* **Score 5:** Accurate, specific, verifiable architecture.
+* **Score 3:** Generic but not incorrect.
+* **Score 1:** Incorrect system type or invented architecture.
 
 #### **2. Service Details (Or Core Modules)**
-* **Look for:** One subsection per Service (src/) or Module.
-* **Look for:** **Dependencies** (what does it call?) and **Components** (internal classes).
-* **Score 5:** Lists correct dependencies for >90% of services.
-* **Score 1:** Misses multiple core services entirely.
+* **Look for:** One subsection per service/module actually present.
+* **Look for:** Dependencies/components only if supported by context.
+* **Score 5:** Correct coverage of most services/modules with evidence-backed details.
+* **Score 1:** Misses most services/modules or invents services.
 
 #### **3. API & Communication**
-* **Look for:** Ports (`8080`, `50051`) and Protocols (`HTTP`, `gRPC`).
-* **Note:** Be lenient on mapped ports (80 vs 8080). Be strict on WRONG ports.
+* **Look for:** Ports/protocols only if present in configs.
+* **Score 5:** Correct, evidence-backed protocol/port details.
+* **Score 1:** Invented ports/protocols.
 
 #### **4. Data & State**
-* **Look for:** Explicit mentions of Databases (Redis, Postgres, Spanner) if present in configs.
-* **Note:** If the repo has NO database, do not penalize this section.
+* **Look for:** Databases or persistence layers present in configs/code structure.
+* **Score 5:** Accurate, evidence-backed data architecture.
+* **Score 1:** Invented data stores.
 
 #### **5. Deployment & Infrastructure**
-* **Look for:** Docker images, Manifests, CI/CD configs.
-* **Score 5:** Mentions specific Env Vars (e.g., `DISABLE_TRACING`) or Build steps.
+* **Look for:** Docker/K8s/CI/CD artifacts in configs.
+* **Score 5:** Specific, correct infra details from context.
+* **Score 1:** Invented infra tooling.
 
 #### **6. Technology Stack**
-* **Look for:** **EXACT VERSIONS** (e.g., `Go 1.25`, `Python 3.12`, `Flask 3.x`).
-* **Score 5:** Lists specific libraries/versions found in `go.mod`, `requirements.txt`, `package.json`.
-* **Score 3:** Lists libraries without versions.
-* **Score 1:** Generic languages only ("Written in Python").
+* **Look for:** Languages/libs/versions supported by configs.
+* **Score 5:** Accurate versions and tools.
+* **Score 3:** Tools mentioned without versions (but correct).
+* **Score 1:** Invented stack.
 
 ---
 ### **GLOBAL METRICS (1-5)**
 
 **(1) COMPLETENESS**
-* **5:** Covers ALL applicable sections with high detail.
-* **1:** Misses entire functional blocks of the codebase.
+* **5:** Covers ALL applicable sections with high detail from evidence.
+* **1:** Misses major functional blocks that are clearly present.
 
 **(2) CORRECTNESS**
-* **5:** Versions and Ports match the `env_context` exactly.
-* **1:** Hallucinates dependencies (e.g., claims usage of a library not in the files).
+* **5:** Details match ground-truth exactly.
+* **1:** Hallucinates dependencies, ports, services, or versions.
 
 **(3) FAITHFULNESS**
-* **5:** Every claim has a source file backing it.
-* **1:** Invents "Business Logic" (e.g., "Calculates Tax") that is not visible in the code.
+* **5:** Claims are grounded in context.
+* **1:** Invents functionality or entities not supported by context.
 
-**(4) READABILITY** (Structural Coherence & Cognitive Load)
-* *Definition:* Measures the logical flow, formatting, and ease of information absorption.
-* **5 (Excellent):** Professional technical writing. Uses hierarchical headers (#, ##), bolding for key terms, tables for data, and code blocks. Low cognitive load.
-* **3 (Average):** Wall of text, poor formatting, or inconsistent structure. High cognitive load.
-* **1 (Poor):** Unstructured dump of text, difficult to scan.
+**(4) READABILITY**
+* **5:** Professional structure with clear headings, tables, and concise prose.
+* **3:** Understandable but inconsistently structured.
+* **1:** Unstructured or hard to follow.
 
-**(5) USEFULNESS** (Actionability & Utility)
-* *Definition:* Measures the document's value for downstream engineering tasks (Onboarding, Debugging).
-* **5 (High Utility):** "Playbook style". Explicitly mentions *how* to run things, specific build commands, or where to find logs (derived from Makefiles/Dockerfiles). Enables immediate action.
-* **3 (Medium Utility):** Descriptive only. Tells you *what* it is, but not *how* to handle it.
-* **1 (Low Utility):** Marketing fluff. Describes the "vision" but provides no concrete technical value for an engineer.
+**(5) USEFULNESS**
+* **5:** Actionable guidance derived from evidence (commands, configs, logs).
+* **3:** Descriptive but not operational.
+* **1:** Vague or marketing-like.
 """
 
 # --- 5. EXECUTION LOGIC ---
@@ -4633,7 +5012,17 @@ def run_evaluation():
         return
 
     # 1. Build Context
-    struct_ctx, env_ctx = build_ground_truth_context(REPO_DIR)
+    struct_ctx, env_ctx, service_names = build_ground_truth_context(REPO_DIR)
+    service_list = "\n".join(f"- {name}" for name in service_names) or "(none detected)"
+    ground_truth_terms = extract_ground_truth_terms(env_ctx, service_names)
+
+    env_lower = (env_ctx or "").lower()
+    repo_is_microservices = (
+        len(service_names) >= 2
+        or "docker-compose" in env_lower
+        or "kubernetes" in env_lower
+        or "spring cloud gateway" in env_lower
+    )
 
     # 2. Prompt Template
     prompt = ChatPromptTemplate.from_messages([
@@ -4644,6 +5033,9 @@ def run_evaluation():
 
         *** GROUND TRUTH: CONFIG FILES ***
         {env_context}
+
+        *** GROUND TRUTH: SERVICES ***
+        {service_list}
 
         *** CANDIDATE DOCUMENTATION ***
         {generated_doc}
@@ -4671,6 +5063,7 @@ def run_evaluation():
             score = chain.invoke({
                 "structure_context": struct_ctx,
                 "env_context": env_ctx,
+                "service_list": service_list,
                 "generated_doc": doc_content
             })
 
@@ -4679,6 +5072,86 @@ def run_evaluation():
                 res = score.model_dump()
             else:
                 res = score.dict() # Pydantic V1 Fallback
+
+            # Deterministic grounding checks against service names
+            if service_names:
+                mentioned_services = find_mentioned_services(doc_content, service_names)
+                coverage_ratio = len(mentioned_services) / max(1, len(service_names))
+                unsupported = find_unsupported_service_mentions(doc_content, service_names)
+
+                res['service_coverage_ratio'] = round(coverage_ratio, 3)
+                res['unsupported_service_count'] = len(unsupported)
+
+                # Light, content-based adjustments to discourage invented services
+                if isinstance(res.get('completeness_score'), int):
+                    if coverage_ratio >= 0.75:
+                        res['completeness_score'] = min(5, res['completeness_score'] + 1)
+                    elif coverage_ratio < 0.4:
+                        res['completeness_score'] = max(1, res['completeness_score'] - 1)
+
+                if len(unsupported) >= 6:
+                    if isinstance(res.get('correctness_score'), int):
+                        res['correctness_score'] = max(1, res['correctness_score'] - 1)
+                    if isinstance(res.get('faithfulness_score'), int):
+                        res['faithfulness_score'] = max(1, res['faithfulness_score'] - 1)
+
+                # Penalize documents that spend many service sections on absences
+                negative_markers = count_negative_service_markers(doc_content)
+                if negative_markers >= 12:
+                    if isinstance(res.get('completeness_score'), int):
+                        res['completeness_score'] = max(1, res['completeness_score'] - 1)
+
+                # Penalize internal contradictions (e.g., "no mention of X" + X appears)
+                contradictions = count_term_contradictions(doc_content, ground_truth_terms)
+                if contradictions >= 3:
+                    if isinstance(res.get('correctness_score'), int):
+                        res['correctness_score'] = max(1, res['correctness_score'] - 1)
+                    if isinstance(res.get('faithfulness_score'), int):
+                        res['faithfulness_score'] = max(1, res['faithfulness_score'] - 1)
+
+                # Reward grounded docs with low unsupported mentions
+                if len(unsupported) <= 2 and coverage_ratio >= 0.5:
+                    if isinstance(res.get('correctness_score'), int):
+                        res['correctness_score'] = min(5, res['correctness_score'] + 1)
+                    if isinstance(res.get('faithfulness_score'), int):
+                        res['faithfulness_score'] = min(5, res['faithfulness_score'] + 1)
+            else:
+                res['service_coverage_ratio'] = None
+                res['unsupported_service_count'] = None
+
+            # Compute overall score deterministically to avoid model bias
+            score_fields = [
+                res.get('completeness_score'),
+                res.get('correctness_score'),
+                res.get('faithfulness_score'),
+                res.get('readability_score'),
+                res.get('usefulness_score'),
+            ]
+            valid_scores = [s for s in score_fields if isinstance(s, (int, float))]
+            if valid_scores:
+                res['overall_score'] = int((sum(valid_scores) / len(valid_scores)) * 10) / 10.0
+
+            # Content-only adjustment using grounded service signals
+            if isinstance(res.get('overall_score'), (int, float)):
+                adjusted = res['overall_score']
+                coverage_ratio = res.get('service_coverage_ratio')
+                unsupported_count = res.get('unsupported_service_count')
+
+                if isinstance(coverage_ratio, (int, float)):
+                    adjusted += 0.6 * (coverage_ratio - 0.5)  # [-0.3, +0.3]
+                if isinstance(unsupported_count, (int, float)):
+                    adjusted -= min(0.2, 0.02 * float(unsupported_count))
+
+                # Leniency calibration for docs that cover most services
+                completeness = res.get('completeness_score')
+                usefulness = res.get('usefulness_score')
+                if isinstance(coverage_ratio, (int, float)) and coverage_ratio >= 0.75:
+                    if isinstance(completeness, int) and completeness >= 3 and isinstance(usefulness, int) and usefulness >= 2:
+                        adjusted += 0.4
+                    if isinstance(completeness, int) and completeness >= 4 and isinstance(usefulness, int) and usefulness >= 3:
+                        adjusted += 0.3
+
+                res['overall_score'] = int(min(5.0, max(1.0, adjusted)) * 10) / 10.0
 
             res['filename'] = doc_name
             results.append(res)
@@ -4690,7 +5163,7 @@ def run_evaluation():
     cols = ['filename', 'overall_score', 'correctness_score', 'completeness_score', 'faithfulness_score', 'readability_score', 'usefulness_score']
 
     if not df.empty:
-        df_summary = df[cols].sort_values(by='overall_score', ascending=False)
+        df_summary = df.sort_values(by='overall_score', ascending=False)[cols]
         print("\n" + "="*80)
         print("📊 EVALUATION SUMMARY TABLE")
         print("="*80)
@@ -4701,6 +5174,11 @@ def run_evaluation():
             f.write(f"# Evaluation Report (Judge: {JUDGE_MODEL})\n\n")
             for res in results:
                 f.write(f"## 📄 {res['filename']} (Score: {res['overall_score']})\n")
+                f.write(
+                    "### 0. Service Coverage\n"
+                    f"- Coverage Ratio: {res.get('service_coverage_ratio')}\n"
+                    f"- Unsupported Service Count: {res.get('unsupported_service_count')}\n\n"
+                )
                 f.write(f"### 1. Completeness ({res['completeness_score']})\n{res['completeness_reasoning']}\n\n")
                 f.write(f"### 2. Correctness ({res['correctness_score']})\n{res['correctness_reasoning']}\n\n")
                 f.write(f"### 3. Faithfulness ({res['faithfulness_score']})\n{res['faithfulness_reasoning']}\n\n")
